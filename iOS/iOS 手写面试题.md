@@ -97,9 +97,160 @@ Test1 *test1 = [[Test1 alloc] init];
 - (void)didChangeValueForKey:(NSString *)key;
 ```
 
-### 3.KVO 防止crash 方案
+### 3、KVO 是否能监听数组的count
 
-### 4.UIViewController的生命周期详解
+正常是不能的，因为count 是`readonly`的，猜测只是实现了get 方法
+
+```objc
+@property (readonly) NSUInteger count;
+```
+
+但是`KVO`的底层是通过重写了熟悉的`set`方法，所以，监听不到
+
+```objective-c
+ - (void)_NSSetIntValueAndNotify{
+    //将要修改age的值
+    [self willChangeValueForKey:@"age"];
+    //调用父类的setAge方法去修改age的值
+    [super setAge:age];
+    //完成修改age的值，并且执行observeValueForKeyPath方法
+    [self didChangeValueForKey:@"age"];
+}
+```
+
+但是，我们可以通过3种方法监听到：
+
+1. `hook` 数组的`insert`、`remove`方法，手动调用`willChangeValueForKey`、`didChangeValueForKey`
+2. [针对可变数组`NSMutableArray`](http://blog.xtxiete.com/2018/12/11/KVOMutableArray%E7%9A%84%E5%88%86%E6%9E%90%E5%92%8C%E7%90%86%E8%A7%A3/)
+
+```objc
+[[self.observerModel mutableArrayValueForKeyPath:@"array"] addObject:@"ff"];
+```
+
+```objc
+-(void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context{
+     NSLog(@"触发了");
+    if([keyPath isEqualToString:@"array"]){
+    }
+}
+```
+
+**调用`mutableArrayValueForKey:`到底做了什么？**
+
+`mutableArrayValueForKey:` 是`NSKeyValueCoding`协议里的一个方法，平时使用`KVC`用的最多的是`valueForKey:`这个方法，`mutableArrayValueForKey:`有点类似`valueForKey:`，都是通过`key`搜索返回一个对象，只是`mutableArrayValueForKey:`返回的是可变数组对象。另外一点就是调用`mutableArrayValueForKey:`后`KVC`的搜索顺序。
+
+调用`mutableArrayValueForKey`后，`KVC`先会搜索类中是否有`insertObject:inAtIndex:` , `removeObjectFromAtIndex:` 或者 `insertAdIndexes` , `removeAtIndexes` 格式的方法，如果至少找到一个`insert`方法和一个`remove`方法，那么返回一个可以响应`NSMutableArray`所有方法的代理集合，那么给这个代理集合发送`NSMutableArray`的方法，以`insertObject:inAtIndex:` , `removeObjectFromAtIndex:` 或者 `insertAdIndexes` , `removeAtIndexes`组合的形式调用。
+
+3. 重写一个数组类
+
+   根据`mutableArrayValueForKey:`方法`KVC`的搜索顺序后，并且结合`KVO`的原理，我们可以新写一个`KVOMutableArrayObserver`类
+
+   ```objective-c
+   @interface ArrayTest : NSObject
+   
+   @property (nonatomic, strong) NSMutableArray* arrar;
+   
+   - (instancetype)init;
+   - (instancetype)initWithMutableArray:(NSMutableArray*)array;
+   
+   - (void)removeObjectFromArrarAtIndex:(NSUInteger)index;
+   - (void)removeArrarAtIndexes:(NSIndexSet *)indexes;
+   - (void)insertObject:(id)obj inArrarAtIndex:(NSUInteger)index;
+   - (void)insertArrar:(NSArray *)array atIndexes:(NSIndexSet *)indexes;
+   @end
+   ```
+
+   ```objective-c
+   @implementation ArrayTest
+   - (instancetype)init
+   {
+       return [self initWithMutableArray:[NSMutableArray new]];
+   }
+   
+   - (instancetype)initWithMutableArray:(NSMutableArray*)array
+   {
+       if((self = [super init]))
+       {
+           _arrar = array;
+       }
+       return self;
+   }
+   
+   - (void)removeObjectFromArrarAtIndex:(NSUInteger)index;
+   {
+       [self.arrar removeObjectAtIndex:index];
+   }
+   
+   - (void)removeArrarAtIndexes:(NSIndexSet *)indexes
+   {
+       [self.arrar removeObjectsAtIndexes:indexes];
+   }
+   
+   - (void)insertObject:(id)obj inArrarAtIndex:(NSUInteger)index
+   {
+       NSLog(@"insertObject：%@ inArrarAtIndex:%ld",obj,index);
+       [self.arrar insertObject:obj atIndex:index];
+   }
+   
+   - (void)insertArrar:(NSArray *)array atIndexes:(NSIndexSet *)indexes;
+   {
+       [self.arrar insertObjects:array atIndexes:indexes];
+   }
+   
+   - (void)willChangeValueForKey:(NSString *)key{
+       [super willChangeValueForKey:key];
+   
+       NSLog(@"willChangeValueForKey : %@",key);
+   }
+   
+   - (void)didChangeValueForKey:(NSString *)key{
+   
+       NSLog(@"didChangeValueForKey : %@ --begin",key);
+   
+       [super didChangeValueForKey:key];
+   
+       NSLog(@"didChangeValueForKey : %@ --end",key);
+   
+   }
+   
+   - (void)willChange:(NSKeyValueChange)changeKind valuesAtIndexes:(NSIndexSet *)indexes forKey:(NSString *)key{
+       [super willChange:changeKind valuesAtIndexes:indexes forKey:key];
+   
+        NSLog(@"willChangeValueForKey : %@",key);
+   }
+   
+   - (void)didChange:(NSKeyValueChange)changeKind valuesAtIndexes:(NSIndexSet *)indexes forKey:(NSString *)key{
+       NSLog(@"didChangeValueForKey : %@ --begin",key);
+       [super didChange:changeKind valuesAtIndexes:indexes forKey:key];
+       NSLog(@"didChangeValueForKey : %@ --end",key);
+   }
+   ```
+
+   然后找个控制器实例化，给数组添加`KVO`监听
+
+   ```objective-c
+   self.array = [NSMutableArray array];
+   
+   self.arrayTest = [[ArrayTest alloc] initWithMutableArray:self.array];
+   
+   [self.arrayTest addObserver:self forKeyPath:@"arrar" options:NSKeyValueObservingOptionNew|NSKeyValueObservingOptionOld context:nil]
+   NSLog(@"添加KVO监听之后：-%@", object_getClass(self.arrayTest));
+   NSLog(@"添加监听之后：- %p", [self.arrayTest methodForSelector:@selector(insertObject:inArrarAtIndex:)]);
+   // 断点 使用LLDB打印一下地址的IMP
+   
+   [self.arrayTest insertObject:@"111" inArrarAtIndex:0]
+   
+   - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context{
+   
+       NSLog(@"观察的属性值改变了：%@",change);
+   }
+   ```
+
+   
+
+### 4、KVO 防止crash 方案
+
+### 5、UIViewController的生命周期详解
 
 1. `+(void)initialize` 第一次初始化的时候调用，再次创建不会调用 `initialize`方法。
 2. `init`和`initCode` 初始化调用，代码初始化调用`init`，从 `nib`或者`xib`、`storyboard` 初始化会调用  `initCode`。
